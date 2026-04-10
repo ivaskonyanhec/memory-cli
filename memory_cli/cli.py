@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -55,9 +56,112 @@ def uv() -> str:
     return "uv"
 
 
+def find_claude() -> str:
+    """Locate the claude CLI binary."""
+    if cli := shutil.which("claude"):
+        return cli
+    for candidate in [
+        Path.home() / ".local" / "bin" / "claude",
+        Path("/usr/local/bin/claude"),
+        Path("/opt/homebrew/bin/claude"),
+    ]:
+        if candidate.exists():
+            return str(candidate)
+    raise click.ClickException("Claude CLI not found. Install Claude Code and ensure `claude` is on PATH.")
+
+
+def verify_claude_available() -> None:
+    """Fail fast if Claude is unavailable for headless compilation."""
+    cmd = [
+        find_claude(),
+        "-p",
+        "Reply with exactly OK.",
+        "--allowedTools",
+        "Read",
+        "--max-turns",
+        "1",
+        "--output-format",
+        "stream-json",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(get_compiler_dir()),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise click.ClickException(
+            "Claude is unavailable for compilation right now. The availability check timed out."
+        ) from exc
+    except OSError as exc:
+        raise click.ClickException(
+            "Claude is unavailable for compilation right now. Failed to run the Claude CLI."
+        ) from exc
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        suffix = f" {detail[-1]}" if detail else ""
+        raise click.ClickException(
+            f"Claude is unavailable for compilation right now.{suffix}"
+        )
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "result":
+            return
+
+    raise click.ClickException(
+        "Claude is unavailable for compilation right now. The availability check did not complete successfully."
+    )
+
+
 def run_script(script: str, *args: str) -> subprocess.CompletedProcess:
     root = get_compiler_dir()
     cmd = [uv(), "run", "--directory", str(root), "python", str(root / "scripts" / script), *args]
+    return subprocess.run(cmd, text=True)
+
+
+def import_markdown_resource(source: Path) -> tuple[Path, str]:
+    """Copy a markdown file into the vault resources folder."""
+    if not source.exists():
+        raise click.ClickException(f"Source file does not exist: {source}")
+    if not source.is_file():
+        raise click.ClickException(f"Source path is not a file: {source}")
+    if source.suffix.lower() != ".md":
+        raise click.ClickException(f"Source file must be a .md file: {source}")
+
+    resources_dir = get_vault_dir() / "resources"
+    resources_dir.mkdir(parents=True, exist_ok=True)
+
+    destination = resources_dir / source.name
+    if destination.exists():
+        raise click.ClickException(f"Resource already exists: {destination}")
+
+    shutil.copy2(source, destination)
+    return destination, f"resources/{source.name}"
+
+
+def compile_single_target(target_file: str) -> subprocess.CompletedProcess:
+    """Compile one specific file through the compiler entrypoint."""
+    root = get_compiler_dir()
+    cmd = [
+        uv(),
+        "run",
+        "--directory",
+        str(root),
+        "python",
+        str(root / "scripts" / "compile.py"),
+        "--file",
+        target_file,
+    ]
     return subprocess.run(cmd, text=True)
 
 
@@ -114,6 +218,7 @@ def print_help() -> None:
     table.add_column("Key options", style="dim")
 
     table.add_row("sync",   "Compile new sessions and clipped sources",      "--all  --file  --dry-run")
+    table.add_row("add",    "Import a markdown resource and compile it",     "")
     table.add_row("lint",   "Run 7 health checks on the knowledge base",     "--structural-only")
     table.add_row("query",  "Ask a question, get an answer from the KB",     "--file-back")
     table.add_row("status", "Show article counts, cost, last compile",       "")
@@ -164,6 +269,9 @@ def sync(force_all: bool, target_file: str | None, dry_run: bool):
     if disabled:
         console.print(f"  [dim]Skipping (disabled in config): {', '.join(disabled)}[/]\n")
 
+    if not dry_run:
+        verify_claude_available()
+
     args: list[str] = []
     if force_all:
         args.append("--all")
@@ -181,6 +289,23 @@ def sync(force_all: bool, target_file: str | None, dry_run: bool):
     root = get_compiler_dir()
     cmd = [uv(), "run", "--directory", str(root), "python", str(root / "scripts" / "compile.py"), *args]
     result = subprocess.run(cmd, text=True, env=env)
+    console.print()
+    sys.exit(result.returncode)
+
+
+# ── memory add ────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("source_path", type=click.Path(path_type=Path))
+def add(source_path: Path):
+    """Import a markdown file into resources/ and compile it immediately."""
+    section_header("memory add")
+
+    verify_claude_available()
+    _, target_file = import_markdown_resource(source_path.expanduser().resolve())
+    console.print(f"  [green]✓[/] Imported [dim]{source_path}[/] -> [bold]{target_file}[/]\n")
+
+    result = compile_single_target(target_file)
     console.print()
     sys.exit(result.returncode)
 

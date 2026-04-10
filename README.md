@@ -6,6 +6,7 @@ Turns verbose `uv run python scripts/compile.py` invocations into simple shell c
 
 ```bash
 memory sync          # compile new conversations and clipped articles
+memory add FILE.md   # import a markdown file into resources/ and compile it
 memory lint          # run 7 knowledge base health checks
 memory query "..."   # ask the knowledge base a question
 memory status        # show article counts, last compile time
@@ -30,6 +31,8 @@ memory config --edit # interactive settings editor
 - **Full tool access** — Claude reads files and writes knowledge articles directly
 
 This is different from the `claude_agent_sdk` approach, which requires a streaming protocol that doesn't work outside interactive Claude Code sessions.
+
+Before `memory sync` and `memory add` run a real compile, `memory-cli` now performs a lightweight Claude availability check. If your Claude session is unavailable or your usage is exhausted, the command stops early instead of staging or compiling files into inconsistent state.
 
 ## Installation
 
@@ -75,6 +78,23 @@ Shows live progress as Claude writes each article:
     Edit:  log.md
   Done.
 ```
+
+### `memory add`
+
+Import a standalone Markdown file into the vault's `resources/` folder and compile it immediately.
+
+```bash
+memory add /path/to/file.md
+```
+
+The command:
+
+- copies the file to `resources/<basename>.md`
+- refuses to overwrite an existing resource with the same name
+- verifies Claude availability before copying the file
+- compiles only that imported file
+
+Use this when you already have a local Markdown note or exported article and want it ingested without waiting for a broader `memory sync`.
 
 ### `memory lint`
 
