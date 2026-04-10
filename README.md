@@ -8,6 +8,7 @@ Turns verbose `uv run python scripts/compile.py` invocations into simple shell c
 memory sync          # compile new conversations and clipped articles
 memory add FILE.md   # import a markdown file into resources/ and compile it
 memory lint          # run 7 knowledge base health checks
+memory lint-fix      # apply safe structural lint fixes
 memory query "..."   # ask the knowledge base a question
 memory status        # show article counts, last compile time
 memory log           # tail the build log
@@ -136,6 +137,21 @@ memory lint --structural-only  # skip LLM check — instant, free
 Checks: broken wikilinks · orphan pages · orphan sources · stale articles · missing backlinks · sparse articles · contradictions
 
 Reports saved to `reports/lint-YYYY-MM-DD.md` in the compiler directory.
+
+### `memory lint-fix`
+
+Apply safe structural fixes to the knowledge base.
+
+```bash
+memory lint-fix
+memory lint-fix --dry-run
+```
+
+Current scope:
+
+- repairs missing backlinks when article `A` links to `B` but `B` does not link back to `A`
+- does not use any provider/LLM
+- does not rewrite contradictions, sparse articles, or broken links
 
 ### `memory query`
 

@@ -149,11 +149,11 @@ def resolve_available_provider():
     return chosen_provider
 
 
-def run_script(script: str, *args: str) -> subprocess.CompletedProcess:
+def run_script(script: str, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
     ensure_compiler_vault_aliases()
     root = get_compiler_dir()
     cmd = [uv(), "run", "--directory", str(root), "python", str(root / "scripts" / script), *args]
-    return subprocess.run(cmd, text=True)
+    return subprocess.run(cmd, text=True, capture_output=capture_output)
 
 
 def import_markdown_resource(source: Path) -> tuple[Path, str]:
@@ -275,9 +275,86 @@ def format_config_value(value) -> str:
     return json.dumps(value, indent=2)
 
 
+def extract_wikilinks(content: str) -> list[str]:
+    import re
+
+    return re.findall(r"\[\[([^\]]+)\]\]", content)
+
+
+def list_knowledge_articles() -> list[Path]:
+    knowledge_dir = get_knowledge_dir()
+    articles: list[Path] = []
+    for subdir in ["concepts", "connections", "qa"]:
+        directory = knowledge_dir / subdir
+        if directory.exists():
+            articles.extend(sorted(directory.glob("*.md")))
+    return articles
+
+
+def compute_missing_backlinks() -> list[tuple[Path, str]]:
+    knowledge_dir = get_knowledge_dir()
+    missing: list[tuple[Path, str]] = []
+
+    for article in list_knowledge_articles():
+        source_rel = article.relative_to(knowledge_dir)
+        source_link = str(source_rel).replace(".md", "").replace("\\", "/")
+        content = article.read_text(encoding="utf-8")
+
+        for link in extract_wikilinks(content):
+            if link.startswith("daily/"):
+                continue
+            target_path = knowledge_dir / f"{link}.md"
+            if not target_path.exists():
+                continue
+            target_content = target_path.read_text(encoding="utf-8")
+            if f"[[{source_link}]]" not in target_content:
+                missing.append((target_path, source_link))
+
+    return missing
+
+
+def add_backlink(path: Path, backlink: str, dry_run: bool) -> bool:
+    content = path.read_text(encoding="utf-8")
+    link_markup = f"[[{backlink}]]"
+    if link_markup in content:
+        return False
+
+    lines = content.splitlines()
+    related_heading = "## Related Concepts"
+    if related_heading in lines:
+        index = lines.index(related_heading)
+        insert_at = index + 1
+        while insert_at < len(lines) and lines[insert_at].strip():
+            insert_at += 1
+        lines.insert(insert_at, f"- {link_markup}")
+        new_content = "\n".join(lines) + ("\n" if content.endswith("\n") else "")
+    else:
+        suffix = "" if content.endswith("\n") else "\n"
+        new_content = f"{content}{suffix}\n## Related Concepts\n- {link_markup}\n"
+
+    if not dry_run:
+        path.write_text(new_content, encoding="utf-8")
+    return True
+
+
 def section_header(title: str, subtitle: str = "") -> None:
     console.print(f"\n  [bold bright_cyan]◆[/]  [bold]{title}[/]  [dim]{subtitle}[/]")
     console.print("  [dim]─────────────────────────────────────[/]\n")
+
+
+def run_with_status(
+    label: str,
+    fn,
+    *args,
+    success_label: str | None = None,
+    spinner: str = "dots12",
+    **kwargs,
+):
+    with console.status(f"[bold]{label}[/]", spinner=spinner):
+        result = fn(*args, **kwargs)
+    if success_label:
+        console.print(f"  [green]✓[/] {success_label}")
+    return result
 
 
 # ── Fancy help screen ─────────────────────────────────────────────────
@@ -366,7 +443,13 @@ def sync(force_all: bool, target_file: str | None, dry_run: bool):
     if disabled:
         console.print(f"  [dim]Skipping (disabled in config): {', '.join(disabled)}[/]\n")
 
-    targets, warnings = list_sync_targets(force_all=force_all, target_file=target_file)
+    targets, warnings = run_with_status(
+        "Selecting sync targets...",
+        list_sync_targets,
+        force_all,
+        target_file,
+    )
+    console.print(f"  [green]✓[/] Sync targets selected: [bold]{len(targets)}[/]")
     for warning in warnings:
         console.print(f"  [yellow]⚠[/] {warning}\n")
 
@@ -381,12 +464,15 @@ def sync(force_all: bool, target_file: str | None, dry_run: bool):
         console.print()
         return
 
-    provider = resolve_available_provider()
+    provider = run_with_status(
+        "Checking providers...",
+        resolve_available_provider,
+    )
     provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
+    console.print(f"  [green]✓[/] Provider ready: [bold]{provider_name}[/]")
     returncode = 0
     for target in targets:
-        with console.status(f"Compiling {target} with {provider_name}...", spinner="dots"):
-            current = provider.compile_one(target)
+        current = run_with_status(f"Compiling {target} with {provider_name}...", provider.compile_one, target)
         console.print(f"  [green]✓[/] Compiled [bold]{target}[/] with [bold]{provider_name}[/]")
         if current != 0:
             returncode = current
@@ -404,13 +490,21 @@ def add(source_path: Path):
     """Import a markdown file into resources/ and compile it immediately."""
     section_header("memory add")
 
-    provider = resolve_available_provider()
-    _, target_file = import_markdown_resource(source_path.expanduser().resolve())
+    provider = run_with_status("Checking providers...", resolve_available_provider)
+    provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
+    console.print(f"  [green]✓[/] Provider ready: [bold]{provider_name}[/]")
+    _, target_file = run_with_status(
+        "Importing markdown into resources...",
+        import_markdown_resource,
+        source_path.expanduser().resolve(),
+    )
     console.print(f"  [green]✓[/] Imported [dim]{source_path}[/] -> [bold]{target_file}[/]\n")
 
-    provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
-    with console.status(f"Compiling {target_file} with {provider_name}...", spinner="dots"):
-        returncode = provider.compile_one(target_file)
+    returncode = run_with_status(
+        f"Compiling {target_file} with {provider_name}...",
+        provider.compile_one,
+        target_file,
+    )
     console.print(f"  [green]✓[/] Compiled [bold]{target_file}[/] with [bold]{provider_name}[/]")
     console.print()
     sys.exit(returncode)
@@ -425,9 +519,79 @@ def lint(structural_only: bool):
     args: list[str] = ["--structural-only"] if structural_only else []
     mode = "structural only" if structural_only else "full  (includes LLM check)"
     section_header("memory lint", mode)
-    result = run_script("lint.py", *args)
+    lint_label = "Running structural lint checks..." if structural_only else "Running full lint checks..."
+    result = run_with_status(
+        lint_label,
+        run_script,
+        "lint.py",
+        *args,
+        capture_output=True,
+    )
+    if result.stdout:
+        console.print(result.stdout, end="")
+
+    if not structural_only and _is_llm_lint_failure(result):
+        console.print("\n  [yellow]⚠[/] LLM contradiction check failed; retrying structural lint only.\n")
+        fallback = run_with_status(
+            "Retrying lint in structural-only mode...",
+            run_script,
+            "lint.py",
+            "--structural-only",
+            capture_output=True,
+            success_label="Structural lint retry completed.",
+        )
+        if fallback.stdout:
+            console.print(fallback.stdout, end="")
+        if fallback.stderr and fallback.returncode != 0:
+            console.print(fallback.stderr, end="")
+        console.print()
+        sys.exit(fallback.returncode)
+
+    if result.stderr and result.returncode != 0:
+        console.print(result.stderr, end="")
+    if result.returncode == 0:
+        completed_label = "Structural lint completed." if structural_only else "Full lint completed."
+        console.print(f"  [green]✓[/] {completed_label}")
     console.print()
     sys.exit(result.returncode)
+
+
+def _is_llm_lint_failure(result: subprocess.CompletedProcess) -> bool:
+    if result.returncode == 0 or not result.stderr:
+        return False
+    stderr = result.stderr
+    return (
+        "check_contradictions" in stderr
+        or "claude_agent_sdk" in stderr
+        or "KeyboardInterrupt" in stderr
+        or "Traceback" in stderr
+    )
+
+
+@main.command("lint-fix")
+@click.option("--dry-run", is_flag=True, help="Show planned structural fixes without editing files.")
+def lint_fix(dry_run: bool):
+    """Apply safe structural fixes to the knowledge base."""
+    section_header("memory lint-fix", "(dry run)" if dry_run else "")
+
+    fixes = run_with_status(
+        "Scanning knowledge base for safe fixes...",
+        compute_missing_backlinks,
+        success_label="Safe structural fixes scanned.",
+    )
+    applied = 0
+    for path, backlink in fixes:
+        action = "Would update" if dry_run else "Updated"
+        changed = add_backlink(path, backlink, dry_run=dry_run)
+        if changed:
+            applied += 1
+            console.print(f"  [green]✓[/] {action} [bold]{path.name}[/] with [dim][[{backlink}]][/]")
+
+    if applied == 0:
+        console.print("  [dim]No safe fixes to apply.[/]\n")
+        return
+
+    console.print(f"\n  [bold]Applied fixes:[/] {applied}\n")
 
 
 # ── memory query ─────────────────────────────────────────────────────
@@ -439,10 +603,15 @@ def query(question: str, file_back: bool):
     """Ask a question and get an answer from the knowledge base."""
     section_header("memory query")
     console.print(f"  [dim]Q:[/] {question}\n")
-    provider = resolve_available_provider()
+    provider = run_with_status("Checking providers...", resolve_available_provider)
     provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
-    with console.status(f"Querying with {provider_name}...", spinner="dots"):
-        returncode = provider.query(question, file_back)
+    console.print(f"  [green]✓[/] Provider ready: [bold]{provider_name}[/]")
+    returncode = run_with_status(
+        f"Querying knowledge base with {provider_name}...",
+        provider.query,
+        question,
+        file_back,
+    )
     console.print()
     sys.exit(returncode)
 
