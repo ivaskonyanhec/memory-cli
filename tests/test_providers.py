@@ -183,6 +183,43 @@ class CodexProviderTests(unittest.TestCase):
 
         self.assertIn("compile_one", str(context.exception))
 
+    def test_codex_provider_query_updates_query_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            compiler_dir = root / "compiler"
+            vault_dir = root / "vault"
+            daily_dir = vault_dir / "daily"
+            resources_dir = vault_dir / "resources"
+            knowledge_dir = vault_dir / "knowledge"
+            (compiler_dir / "scripts").mkdir(parents=True)
+            (knowledge_dir / "concepts").mkdir(parents=True)
+            daily_dir.mkdir(parents=True)
+            resources_dir.mkdir(parents=True)
+            (knowledge_dir / "index.md").write_text("# Index\n", encoding="utf-8")
+            (knowledge_dir / "concepts" / "answer.md").write_text("content\n", encoding="utf-8")
+            (compiler_dir / "scripts" / "state.json").write_text(
+                '{"ingested": {}, "sources": {}, "query_count": 0, "last_lint": null, "total_cost": 0.0}',
+                encoding="utf-8",
+            )
+
+            provider = CodexProvider(
+                compiler_dir_getter=lambda: compiler_dir,
+                vault_dir_getter=lambda: vault_dir,
+                daily_dir_getter=lambda: daily_dir,
+                resources_dir_getter=lambda: resources_dir,
+                knowledge_dir_getter=lambda: knowledge_dir,
+            )
+
+            with patch("memory_cli.providers.codex.shutil.which", return_value="/usr/local/bin/codex"), patch(
+                "memory_cli.providers.codex.subprocess.run",
+                return_value=Mock(returncode=0, stdout="Answer text\n", stderr=""),
+            ):
+                returncode = provider.query("What is memory?", False)
+
+            self.assertEqual(returncode, 0)
+            state = json.loads((compiler_dir / "scripts" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["query_count"], 1)
+
 
 class ProviderRoutingTests(unittest.TestCase):
     def setUp(self) -> None:

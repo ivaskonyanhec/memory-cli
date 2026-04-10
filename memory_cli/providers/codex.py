@@ -129,7 +129,57 @@ class CodexProvider:
         return 0
 
     def query(self, question: str, file_back: bool) -> int:
-        raise click.ClickException("Codex provider is not implemented yet for query.")
+        compiler_dir = self._get_compiler_dir()
+        knowledge_dir = self._get_knowledge_dir()
+        qa_dir = knowledge_dir / "qa"
+        before = self._snapshot_knowledge(knowledge_dir) if file_back else {}
+
+        prompt = self._build_query_prompt(question, file_back)
+        cmd = [
+            self._find_codex(),
+            "exec",
+            "--skip-git-repo-check",
+            "--full-auto",
+            "-C",
+            str(compiler_dir),
+            "--add-dir",
+            str(self._get_vault_dir()),
+            prompt,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise click.ClickException(
+                "Codex timed out while querying the knowledge base."
+            ) from exc
+        except OSError as exc:
+            raise click.ClickException(
+                "Failed to run Codex for querying."
+            ) from exc
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            suffix = f" {detail[-1]}" if detail else ""
+            raise click.ClickException(f"Codex query failed.{suffix}")
+
+        answer = (result.stdout or "").strip()
+        if answer:
+            print(answer)
+
+        if file_back:
+            after = self._snapshot_knowledge(knowledge_dir)
+            if before == after or not qa_dir.exists():
+                raise click.ClickException(
+                    "Codex did not file the query answer back into the knowledge base."
+                )
+
+        self._update_query_state()
+        return 0
 
     def _resolve_target(self, target_file: str) -> tuple[Path, str, str]:
         target = Path(target_file)
@@ -244,6 +294,62 @@ Read the clipped source above and compile it into wiki articles following the sc
                 parts.append(f"### {rel}\n```markdown\n{content}\n```")
         return "\n\n".join(parts)
 
+    def _read_all_wiki_content(self) -> str:
+        knowledge_dir = self._get_knowledge_dir()
+        parts = [f"## INDEX\n\n{self._read_index()}"]
+        for subdir in ["concepts", "connections", "qa"]:
+            directory = knowledge_dir / subdir
+            if not directory.exists():
+                continue
+            for md_file in sorted(directory.glob("*.md")):
+                rel = md_file.relative_to(knowledge_dir)
+                content = md_file.read_text(encoding="utf-8")
+                parts.append(f"## {rel}\n\n{content}")
+        return "\n\n---\n\n".join(parts)
+
+    def _build_query_prompt(self, question: str, file_back: bool) -> str:
+        knowledge_dir = self._get_knowledge_dir()
+        qa_dir = knowledge_dir / "qa"
+        wiki_content = self._read_all_wiki_content()
+        file_back_instructions = ""
+        if file_back:
+            timestamp = self._now_iso()
+            file_back_instructions = f"""
+
+## File Back Instructions
+
+After answering, do the following:
+1. Create a Q&A article at {qa_dir}/ with the filename being a slugified version of the question
+2. Update {knowledge_dir / 'index.md'} with a new row for this Q&A article
+3. Append to {knowledge_dir / 'log.md'}:
+   ## [{timestamp}] query (filed) | question summary
+   - Question: {question}
+   - Consulted: [[list of articles read]]
+   - Filed to: [[qa/article-name]]
+"""
+
+        return f"""You are a knowledge base query engine. Answer the user's question by
+consulting the knowledge base below.
+
+## How to Answer
+
+1. Read the INDEX section first
+2. Identify 3-10 articles that are relevant to the question
+3. Read those articles carefully
+4. Synthesize a clear, thorough answer
+5. Cite your sources using [[wikilinks]]
+6. If the knowledge base does not contain relevant information, say so honestly
+
+## Knowledge Base
+
+{wiki_content}
+
+## Question
+
+{question}
+{file_back_instructions}
+"""
+
     def _read_index(self) -> str:
         index_path = self._get_knowledge_dir() / "index.md"
         if index_path.exists():
@@ -269,6 +375,17 @@ Read the clipped source above and compile it into wiki articles following the sc
             "compiled_at": self._now_iso(),
             "cost_usd": 0.0,
         }
+        state["total_cost"] = state.get("total_cost", 0.0)
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _update_query_state(self) -> None:
+        state_path = self._get_compiler_dir() / "scripts" / "state.json"
+        if state_path.exists():
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        else:
+            state = {"ingested": {}, "sources": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
+
+        state["query_count"] = state.get("query_count", 0) + 1
         state["total_cost"] = state.get("total_cost", 0.0)
         state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 

@@ -37,15 +37,24 @@ This project follows the general idea of building explicit external memory for L
 
 https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
 
-`memory sync` uses `claude -p` (Claude Code's headless/scripting mode) to run the compiler. This means:
+`memory-cli` uses authenticated local CLIs as providers. Right now the supported providers are:
 
-- **No API key needed** — uses your existing Claude Code session
-- **No subprocess hangs** — `claude -p` exits cleanly after the task completes
-- **Full tool access** — Claude reads files and writes knowledge articles directly
+- `claude` via `claude -p`
+- `codex` via `codex exec`
 
-This is different from the `claude_agent_sdk` approach, which requires a streaming protocol that doesn't work outside interactive Claude Code sessions.
+This means:
 
-Before `memory sync` and `memory add` run a real compile, `memory-cli` now performs a lightweight provider availability check. If your primary provider is unavailable, the CLI can fall back to the next configured local CLI provider.
+- **No API key needed** — uses your existing local CLI login/session
+- **Full tool access** — the provider can read and write knowledge files directly
+
+Before `memory sync`, `memory add`, and `memory query` run real work, `memory-cli` performs a lightweight provider availability check. If the primary provider is unavailable, it tries the next provider in `llm_fallback_order` and prints the fallback in the console.
+
+Example:
+
+```bash
+memory config set llm_provider claude
+memory config set llm_fallback_order '["claude","codex"]'
+```
 
 ## Installation
 
@@ -90,14 +99,12 @@ memory sync --file daily/2026-04-10.md  # compile a specific file
 memory sync --dry-run                    # preview what would be compiled
 ```
 
-Shows live progress as Claude writes each article:
+`memory-cli` now selects sync targets itself, so `sync.daily` and `sync.sources` are enforced by the CLI before delegation to the active provider.
+
+Shows live progress while the selected provider compiles each file:
 ```
-[1/1] Compiling source: Git Commit Message AI.md...
-    Write: ai-git-commit-workflow.md
-    Write: llm-cli-tool.md
-    Edit:  index.md
-    Edit:  log.md
-  Done.
+Compiling resources/ARCHITECTURE.md with codex...
+Compiled resources/ARCHITECTURE.md with codex
 ```
 
 ### `memory add`
@@ -112,7 +119,7 @@ The command:
 
 - copies the file to your configured resources folder
 - refuses to overwrite an existing resource with the same name
-- verifies Claude availability before copying the file
+- verifies provider availability before copying the file
 - compiles only that imported file
 
 Use this when you already have a local Markdown note or exported article and want it ingested without waiting for a broader `memory sync`.
@@ -183,6 +190,9 @@ memory config keys
 memory config get llm_provider
 memory config set llm_provider codex
 memory config set llm_fallback_order '["claude","codex"]'
+memory config set daily_dirname journal
+memory config set resources_dirname references
+memory config set knowledge_dirname brain
 memory config --edit   # interactive editor
 ```
 
@@ -194,7 +204,11 @@ Settings are stored at `~/.memory-cli/config.json`. The editor and `get/set` com
 - **Providers** — primary LLM provider and ordered fallback providers
 - **Behaviour** — auto-compile hour (0–23), default log lines, show/hide cost
 
-At the moment, `sync.daily` and `sync.sources` are enforced directly by `memory-cli`. `sync.custom_dirs` can be configured, but the current external compiler does not support compiling arbitrary custom directory files, so those entries are skipped with a warning.
+At the moment:
+
+- `sync.daily` and `sync.sources` are enforced directly by `memory-cli`
+- `sync.custom_dirs` can be configured, but the current external compiler does not support compiling arbitrary custom directory files, so those entries are skipped with a warning
+- configurable vault folder names work from the CLI side; `memory-cli` creates compiler-compatible aliases inside the vault so the external compiler can still operate
 
 ## How it works
 
@@ -221,6 +235,7 @@ At the moment, `sync.daily` and `sync.sources` are enforced directly by `memory-
 | `resources_dirname` | `resources` | Imported/clipped sources folder under the vault |
 | `knowledge_dirname` | `knowledge` | Knowledge base folder under the vault |
 | `llm_provider` | `claude` | Backend used for compile and query flows |
+| `llm_fallback_order` | `["claude"]` | Ordered provider fallback list |
 | `sync.daily` | `true` | Compile daily session logs |
 | `sync.sources` | `true` | Compile clipped web articles |
 | `sync.custom_dirs` | `[]` | Extra directories to compile |
