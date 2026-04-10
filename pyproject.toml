@@ -1,0 +1,15 @@
+[project]
+name = "memory-cli"
+version = "0.1.0"
+description = "Global CLI for the claude-memory-compiler knowledge base"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+memory = "memory_cli.cli:main"
+
+[tool.ruff]
+line-length = 100
