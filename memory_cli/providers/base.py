@@ -1,0 +1,13 @@
+from __future__ import annotations
+
+from typing import Protocol
+
+
+class Provider(Protocol):
+    def check_available(self) -> None: ...
+
+    def compile(self, *, force_all: bool, target_file: str | None, dry_run: bool) -> int: ...
+
+    def compile_one(self, target_file: str) -> int: ...
+
+    def query(self, question: str, file_back: bool) -> int: ...

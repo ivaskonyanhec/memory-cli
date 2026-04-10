@@ -12,8 +12,17 @@ memory query "..."   # ask the knowledge base a question
 memory status        # show article counts, last compile time
 memory log           # tail the build log
 memory config        # view and edit settings
+memory config keys   # list configurable keys
+memory config get K  # read one config value
+memory config set K V # update one config value
 memory config --edit # interactive settings editor
 ```
+
+## What a memory means here
+
+In this project, a memory is a durable Markdown note distilled from raw inputs such as Claude Code session logs, clipped references, or imported documents.
+
+It is not the full transcript. It is the compact, reusable knowledge extracted from those sources and stored in your vault as linked notes that can be queried, updated, and recompiled over time.
 
 ## Requirements
 
@@ -24,6 +33,10 @@ memory config --edit # interactive settings editor
 
 ## How compilation works
 
+This project follows the general idea of building explicit external memory for LLM workflows: turn raw context into compact reusable notes, then retrieve and refine those notes over time. A short reference for that approach is Andrej Karpathy's note here:
+
+https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
+
 `memory sync` uses `claude -p` (Claude Code's headless/scripting mode) to run the compiler. This means:
 
 - **No API key needed** — uses your existing Claude Code session
@@ -32,7 +45,7 @@ memory config --edit # interactive settings editor
 
 This is different from the `claude_agent_sdk` approach, which requires a streaming protocol that doesn't work outside interactive Claude Code sessions.
 
-Before `memory sync` and `memory add` run a real compile, `memory-cli` now performs a lightweight Claude availability check. If your Claude session is unavailable or your usage is exhausted, the command stops early instead of staging or compiling files into inconsistent state.
+Before `memory sync` and `memory add` run a real compile, `memory-cli` now performs a lightweight provider availability check. If your primary provider is unavailable, the CLI can fall back to the next configured local CLI provider.
 
 ## Installation
 
@@ -55,6 +68,14 @@ export MEMORY_COMPILER_DIR="/path/to/your/claude-memory-compiler"
 ```
 
 Or run `memory config --edit` and set it there.
+
+## Configuration
+
+`memory-cli` stores its settings in a single file:
+
+`~/.memory-cli/config.json`
+
+The CLI reads and writes this file for both command behavior and provider selection. You can inspect the full config with `memory config`, list valid keys with `memory config keys`, read one value with `memory config get`, update one value with `memory config set`, or use `memory config --edit` for the interactive editor.
 
 ## Commands
 
@@ -81,7 +102,7 @@ Shows live progress as Claude writes each article:
 
 ### `memory add`
 
-Import a standalone Markdown file into the vault's `resources/` folder and compile it immediately.
+Import a standalone Markdown file into the configured vault resources folder and compile it immediately.
 
 ```bash
 memory add /path/to/file.md
@@ -89,7 +110,7 @@ memory add /path/to/file.md
 
 The command:
 
-- copies the file to `resources/<basename>.md`
+- copies the file to your configured resources folder
 - refuses to overwrite an existing resource with the same name
 - verifies Claude availability before copying the file
 - compiles only that imported file
@@ -158,16 +179,22 @@ View or edit settings interactively.
 
 ```bash
 memory config          # show current configuration
+memory config keys
+memory config get llm_provider
+memory config set llm_provider codex
+memory config set llm_fallback_order '["claude","codex"]'
 memory config --edit   # interactive editor
 ```
 
-Settings are stored at `~/.memory-cli/config.json`. The editor lets you:
+Settings are stored at `~/.memory-cli/config.json`. The editor and `get/set` commands update the same file. You can configure:
 
 - **Toggle sync folders** — enable/disable `daily/`, `resources/`, or add custom directories
 - **Set paths** — compiler directory and Obsidian vault directory
+- **Set vault folder names** — daily, resources, and knowledge subfolders under the vault
+- **Providers** — primary LLM provider and ordered fallback providers
 - **Behaviour** — auto-compile hour (0–23), default log lines, show/hide cost
 
-Changes to vault path and compile hour are written back to the compiler's `config.py` and `flush.py` automatically.
+At the moment, `sync.daily` and `sync.sources` are enforced directly by `memory-cli`. `sync.custom_dirs` can be configured, but the current external compiler does not support compiling arbitrary custom directory files, so those entries are skipped with a warning.
 
 ## How it works
 
@@ -190,6 +217,10 @@ Changes to vault path and compile hour are written back to the compiler's `confi
 |---------|---------|-------------|
 | `compiler_dir` | `~/projects/ai/claude-memory-compiler` | Path to compiler |
 | `vault_dir` | `~/My Documents/LLM-Brain-General` | Obsidian vault path |
+| `daily_dirname` | `daily` | Daily logs folder under the vault |
+| `resources_dirname` | `resources` | Imported/clipped sources folder under the vault |
+| `knowledge_dirname` | `knowledge` | Knowledge base folder under the vault |
+| `llm_provider` | `claude` | Backend used for compile and query flows |
 | `sync.daily` | `true` | Compile daily session logs |
 | `sync.sources` | `true` | Compile clipped web articles |
 | `sync.custom_dirs` | `[]` | Extra directories to compile |

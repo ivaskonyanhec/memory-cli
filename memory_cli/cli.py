@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -21,10 +21,19 @@ from rich.table import Table
 from rich.text import Text
 
 from memory_cli import config_store
+from memory_cli.providers import ClaudeProvider, CodexProvider
 
 console = Console()
 
 VERSION = "0.1.0"
+COMPILER_VAULT_DIR_ALIASES = {
+    "daily": "daily_dirname",
+    "resources": "resources_dirname",
+    "knowledge": "knowledge_dirname",
+}
+PROVIDER_ALIASES = {
+    "openai": "codex",
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -45,6 +54,18 @@ def get_vault_dir() -> Path:
     return Path(config_store.get("vault_dir"))
 
 
+def get_daily_dir() -> Path:
+    return get_vault_dir() / config_store.get("daily_dirname", "daily")
+
+
+def get_resources_dir() -> Path:
+    return get_vault_dir() / config_store.get("resources_dirname", "resources")
+
+
+def get_knowledge_dir() -> Path:
+    return get_vault_dir() / config_store.get("knowledge_dirname", "knowledge")
+
+
 def uv() -> str:
     for candidate in [
         Path.home() / ".local" / "bin" / "uv",
@@ -56,74 +77,80 @@ def uv() -> str:
     return "uv"
 
 
-def find_claude() -> str:
-    """Locate the claude CLI binary."""
-    if cli := shutil.which("claude"):
-        return cli
-    for candidate in [
-        Path.home() / ".local" / "bin" / "claude",
-        Path("/usr/local/bin/claude"),
-        Path("/opt/homebrew/bin/claude"),
-    ]:
-        if candidate.exists():
-            return str(candidate)
-    raise click.ClickException("Claude CLI not found. Install Claude Code and ensure `claude` is on PATH.")
-
-
-def verify_claude_available() -> None:
-    """Fail fast if Claude is unavailable for headless compilation."""
-    cmd = [
-        find_claude(),
-        "-p",
-        "Reply with exactly OK.",
-        "--allowedTools",
-        "Read",
-        "--max-turns",
-        "1",
-        "--output-format",
-        "stream-json",
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=str(get_compiler_dir()),
+def make_provider(provider_name: str):
+    provider_name = PROVIDER_ALIASES.get(provider_name, provider_name)
+    if provider_name == "claude":
+        return ClaudeProvider(
+            compiler_dir_getter=get_compiler_dir,
+            uv_getter=uv,
+            run_script=run_script,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise click.ClickException(
-            "Claude is unavailable for compilation right now. The availability check timed out."
-        ) from exc
-    except OSError as exc:
-        raise click.ClickException(
-            "Claude is unavailable for compilation right now. Failed to run the Claude CLI."
-        ) from exc
-
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip().splitlines()
-        suffix = f" {detail[-1]}" if detail else ""
-        raise click.ClickException(
-            f"Claude is unavailable for compilation right now.{suffix}"
+    if provider_name == "codex":
+        return CodexProvider(
+            compiler_dir_getter=get_compiler_dir,
+            vault_dir_getter=get_vault_dir,
+            daily_dir_getter=get_daily_dir,
+            resources_dir_getter=get_resources_dir,
+            knowledge_dir_getter=get_knowledge_dir,
         )
+    raise click.ClickException(f"Unknown provider: {provider_name}")
 
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
+
+def get_provider_names() -> list[str]:
+    primary = config_store.get("llm_provider", "claude")
+    configured = config_store.get("llm_fallback_order", None)
+    candidates = configured if configured else [primary]
+
+    ordered: list[str] = []
+    for name in [primary, *candidates]:
+        canonical = PROVIDER_ALIASES.get(name, name)
+        if canonical not in ordered:
+            ordered.append(canonical)
+    return ordered
+
+
+def resolve_available_provider():
+    errors: list[tuple[str, str]] = []
+    chosen_name: str | None = None
+    chosen_provider = None
+
+    raw_names = config_store.get("llm_fallback_order", None) or [config_store.get("llm_provider", "claude")]
+    seen: set[str] = set()
+    ordered_pairs: list[tuple[str, str]] = []
+    for raw_name in [config_store.get("llm_provider", "claude"), *raw_names]:
+        canonical = PROVIDER_ALIASES.get(raw_name, raw_name)
+        if canonical in seen:
             continue
+        seen.add(canonical)
+        ordered_pairs.append((raw_name, canonical))
+
+    for raw_name, provider_name in ordered_pairs:
+        if raw_name != provider_name:
+            console.print(
+                f"  [yellow]⚠[/] Provider alias [bold]{raw_name}[/] is deprecated; using [bold]{provider_name}[/] instead."
+            )
+        provider = make_provider(provider_name)
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") == "result":
-            return
+            provider.check_available()
+            chosen_name = provider_name
+            chosen_provider = provider
+            break
+        except click.ClickException as exc:
+            errors.append((provider_name, str(exc)))
+            console.print(f"  [yellow]⚠[/] Provider unavailable: [bold]{provider_name}[/]")
 
-    raise click.ClickException(
-        "Claude is unavailable for compilation right now. The availability check did not complete successfully."
-    )
+    if chosen_provider is None or chosen_name is None:
+        details = "\n".join(f"  - {name}: {message}" for name, message in errors)
+        raise click.ClickException(f"No available providers.\n{details}")
+
+    if errors:
+        console.print(f"  [bright_cyan]→[/] Falling back to provider: [bold]{chosen_name}[/]\n")
+
+    return chosen_provider
 
 
 def run_script(script: str, *args: str) -> subprocess.CompletedProcess:
+    ensure_compiler_vault_aliases()
     root = get_compiler_dir()
     cmd = [uv(), "run", "--directory", str(root), "python", str(root / "scripts" / script), *args]
     return subprocess.run(cmd, text=True)
@@ -138,7 +165,7 @@ def import_markdown_resource(source: Path) -> tuple[Path, str]:
     if source.suffix.lower() != ".md":
         raise click.ClickException(f"Source file must be a .md file: {source}")
 
-    resources_dir = get_vault_dir() / "resources"
+    resources_dir = get_resources_dir()
     resources_dir.mkdir(parents=True, exist_ok=True)
 
     destination = resources_dir / source.name
@@ -149,33 +176,103 @@ def import_markdown_resource(source: Path) -> tuple[Path, str]:
     return destination, f"resources/{source.name}"
 
 
-def compile_single_target(target_file: str) -> subprocess.CompletedProcess:
-    """Compile one specific file through the compiler entrypoint."""
-    root = get_compiler_dir()
-    cmd = [
-        uv(),
-        "run",
-        "--directory",
-        str(root),
-        "python",
-        str(root / "scripts" / "compile.py"),
-        "--file",
-        target_file,
-    ]
-    return subprocess.run(cmd, text=True)
+def ensure_compiler_vault_aliases() -> None:
+    vault_dir = get_vault_dir()
+    vault_dir.mkdir(parents=True, exist_ok=True)
+
+    for compiler_name, config_key in COMPILER_VAULT_DIR_ALIASES.items():
+        configured_name = config_store.get(config_key, compiler_name)
+        configured_path = vault_dir / configured_name
+        configured_path.mkdir(parents=True, exist_ok=True)
+
+        alias_path = vault_dir / compiler_name
+        if alias_path == configured_path:
+            continue
+
+        if alias_path.is_symlink():
+            if alias_path.resolve() == configured_path.resolve():
+                continue
+            raise click.ClickException(
+                f"Compiler alias conflict: {alias_path} points to {alias_path.resolve()}, expected {configured_path}."
+            )
+
+        if alias_path.exists():
+            raise click.ClickException(
+                f"Compiler alias conflict: {alias_path} exists, but {config_key} is set to {configured_name}."
+            )
+
+        alias_path.symlink_to(configured_path)
 
 
-def patch_compiler_config(key: str, value: str) -> None:
-    """Rewrite a variable assignment in the compiler's config.py."""
-    cfg_path = get_compiler_dir() / "scripts" / "config.py"
-    if not cfg_path.exists():
-        return
-    content = cfg_path.read_text(encoding="utf-8")
-    pattern = rf'^({re.escape(key)}\s*=\s*).*$'
-    replacement = rf'\g<1>Path("{value}")'
-    new_content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
-    if new_content != content:
-        cfg_path.write_text(new_content, encoding="utf-8")
+def file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def load_compiler_state() -> dict:
+    state_file = get_compiler_dir() / "scripts" / "state.json"
+    if not state_file.exists():
+        return {"ingested": {}, "sources": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
+    return json.loads(state_file.read_text(encoding="utf-8"))
+
+
+def list_sync_targets(force_all: bool, target_file: str | None) -> tuple[list[str], list[str]]:
+    if target_file:
+        return [target_file], []
+
+    cfg = config_store.load()
+    sync_cfg = cfg.get("sync", {})
+    daily_enabled = sync_cfg.get("daily", True)
+    sources_enabled = sync_cfg.get("sources", True)
+    custom_dirs: list[str] = sync_cfg.get("custom_dirs", [])
+
+    vault_dir = get_vault_dir()
+    state = load_compiler_state()
+    targets: list[str] = []
+    warnings: list[str] = []
+
+    if daily_enabled:
+        daily_dir = get_daily_dir()
+        if daily_dir.exists():
+            for path in sorted(daily_dir.glob("*.md")):
+                if force_all or _needs_compile(path, state.get("ingested", {})):
+                    targets.append(f"daily/{path.name}")
+
+    if sources_enabled:
+        resources_dir = get_resources_dir()
+        if resources_dir.exists():
+            for path in sorted(resources_dir.glob("*.md")):
+                if force_all or _needs_compile(path, state.get("sources", {})):
+                    targets.append(f"resources/{path.name}")
+
+    if custom_dirs:
+        warnings.append(
+            "Custom sync dirs are not supported by the current external compiler and will be skipped."
+        )
+
+    return targets, warnings
+
+
+def _needs_compile(path: Path, state_bucket: dict) -> bool:
+    entry = state_bucket.get(path.name)
+    if not entry:
+        return True
+    return entry.get("hash") != file_hash(path)
+
+
+def parse_config_value(raw: str):
+    lowered = raw.lower()
+    if lowered in {"true", "false", "null"}:
+        return json.loads(lowered)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def format_config_value(value) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, indent=2)
 
 
 def section_header(title: str, subtitle: str = "") -> None:
@@ -269,28 +366,34 @@ def sync(force_all: bool, target_file: str | None, dry_run: bool):
     if disabled:
         console.print(f"  [dim]Skipping (disabled in config): {', '.join(disabled)}[/]\n")
 
-    if not dry_run:
-        verify_claude_available()
+    targets, warnings = list_sync_targets(force_all=force_all, target_file=target_file)
+    for warning in warnings:
+        console.print(f"  [yellow]⚠[/] {warning}\n")
 
-    args: list[str] = []
-    if force_all:
-        args.append("--all")
-    if target_file:
-        args.extend(["--file", target_file])
+    if not targets:
+        console.print("  [dim]Nothing to compile for the enabled sync targets.[/]\n")
+        return
+
     if dry_run:
-        args.append("--dry-run")
+        console.print(f"  [bold]Files to compile ({len(targets)})[/]")
+        for target in targets:
+            console.print(f"    {target}")
+        console.print()
+        return
 
-    # Pass enabled folders via env vars the compiler can read
-    env = os.environ.copy()
-    env["MEMORY_SYNC_DAILY"] = "1" if daily_enabled else "0"
-    env["MEMORY_SYNC_SOURCES"] = "1" if sources_enabled else "0"
-    env["MEMORY_CUSTOM_DIRS"] = json.dumps(custom_dirs)
+    provider = resolve_available_provider()
+    provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
+    returncode = 0
+    for target in targets:
+        with console.status(f"Compiling {target} with {provider_name}...", spinner="dots"):
+            current = provider.compile_one(target)
+        console.print(f"  [green]✓[/] Compiled [bold]{target}[/] with [bold]{provider_name}[/]")
+        if current != 0:
+            returncode = current
+            break
 
-    root = get_compiler_dir()
-    cmd = [uv(), "run", "--directory", str(root), "python", str(root / "scripts" / "compile.py"), *args]
-    result = subprocess.run(cmd, text=True, env=env)
     console.print()
-    sys.exit(result.returncode)
+    sys.exit(returncode)
 
 
 # ── memory add ────────────────────────────────────────────────────────
@@ -301,13 +404,16 @@ def add(source_path: Path):
     """Import a markdown file into resources/ and compile it immediately."""
     section_header("memory add")
 
-    verify_claude_available()
+    provider = resolve_available_provider()
     _, target_file = import_markdown_resource(source_path.expanduser().resolve())
     console.print(f"  [green]✓[/] Imported [dim]{source_path}[/] -> [bold]{target_file}[/]\n")
 
-    result = compile_single_target(target_file)
+    provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
+    with console.status(f"Compiling {target_file} with {provider_name}...", spinner="dots"):
+        returncode = provider.compile_one(target_file)
+    console.print(f"  [green]✓[/] Compiled [bold]{target_file}[/] with [bold]{provider_name}[/]")
     console.print()
-    sys.exit(result.returncode)
+    sys.exit(returncode)
 
 
 # ── memory lint ───────────────────────────────────────────────────────
@@ -331,12 +437,14 @@ def lint(structural_only: bool):
 @click.option("--file-back", is_flag=True, help="Save the answer as a Q&A article in knowledge/qa/.")
 def query(question: str, file_back: bool):
     """Ask a question and get an answer from the knowledge base."""
-    args = [question] + (["--file-back"] if file_back else [])
     section_header("memory query")
     console.print(f"  [dim]Q:[/] {question}\n")
-    result = run_script("query.py", *args)
+    provider = resolve_available_provider()
+    provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
+    with console.status(f"Querying with {provider_name}...", spinner="dots"):
+        returncode = provider.query(question, file_back)
     console.print()
-    sys.exit(result.returncode)
+    sys.exit(returncode)
 
 
 # ── memory status ────────────────────────────────────────────────────
@@ -358,7 +466,7 @@ def status():
     query_count = state.get("query_count", 0)
     last_lint = state.get("last_lint")
 
-    vault = get_vault_dir() / "knowledge"
+    vault = get_knowledge_dir()
     concept_count    = len(list((vault / "concepts").glob("*.md")))    if (vault / "concepts").exists()    else 0
     connection_count = len(list((vault / "connections").glob("*.md"))) if (vault / "connections").exists() else 0
     qa_count         = len(list((vault / "qa").glob("*.md")))          if (vault / "qa").exists()          else 0
@@ -404,7 +512,7 @@ def status():
 def log(lines: int | None):
     """Tail the knowledge build log."""
     n = lines or config_store.get("log_lines", 30)
-    log_path = get_vault_dir() / "knowledge" / "log.md"
+    log_path = get_knowledge_dir() / "log.md"
 
     section_header("memory log", f"last {n} entries")
 
@@ -430,14 +538,45 @@ def log(lines: int | None):
 
 # ── memory config ────────────────────────────────────────────────────
 
-@main.command()
+@main.group(invoke_without_command=True)
 @click.option("--edit", is_flag=True, help="Open interactive settings editor.")
-def config(edit: bool):
-    """View current settings, or edit them with --edit."""
+@click.pass_context
+def config(ctx: click.Context, edit: bool):
+    """View, get, set, or edit CLI settings stored in one config file."""
     if edit:
         _config_editor()
-    else:
+        return
+    if ctx.invoked_subcommand is None:
         _config_show()
+
+
+@config.command("get")
+@click.argument("key")
+def config_get(key: str):
+    """Print a config value by key."""
+    value = config_store.get(key)
+    if value is None:
+        raise click.ClickException(f"Unknown config key: {key}")
+    console.print(format_config_value(value))
+
+
+@config.command("keys")
+def config_keys():
+    """List all available config keys."""
+    section_header("memory config", "available keys")
+    for key in config_store.list_keys():
+        console.print(f"  {key}")
+    console.print()
+
+
+@config.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str):
+    """Set a config value by key."""
+    parsed = parse_config_value(value)
+    config_store.set_key(key, parsed)
+    console.print(f"[green]✓[/] Set [bold]{key}[/] = {format_config_value(parsed)}")
 
 
 def _config_show() -> None:
@@ -455,6 +594,11 @@ def _config_show() -> None:
 
     paths_table.add_row("Compiler dir",   cfg.get("compiler_dir", "—"))
     paths_table.add_row("Vault dir",      cfg.get("vault_dir", "—"))
+    paths_table.add_row("Daily folder",   cfg.get("daily_dirname", "daily"))
+    paths_table.add_row("Resources folder", cfg.get("resources_dirname", "resources"))
+    paths_table.add_row("Knowledge folder", cfg.get("knowledge_dirname", "knowledge"))
+    paths_table.add_row("LLM provider",   cfg.get("llm_provider", "—"))
+    paths_table.add_row("Fallback order", format_config_value(cfg.get("llm_fallback_order", [])))
 
     console.print("  [bold]Paths[/]")
     console.print(paths_table)
@@ -477,6 +621,8 @@ def _config_show() -> None:
     beh_table.add_column("Setting",  style="dim",        min_width=20)
     beh_table.add_column("Value",    style="bold white")
 
+    beh_table.add_row("Provider",            cfg.get("llm_provider", "claude"))
+    beh_table.add_row("Fallback order",      format_config_value(cfg.get("llm_fallback_order", ["claude"])))
     beh_table.add_row("Auto-compile after", f"{cfg.get('compile_after_hour', 18)}:00")
     beh_table.add_row("Log lines default",  str(cfg.get("log_lines", 30)))
     beh_table.add_row("Show cost",          "[green]yes[/]" if cfg.get("show_cost", True) else "[red]no[/]")
@@ -507,6 +653,27 @@ def _config_editor() -> None:
         if compiler != cfg.get("compiler_dir"):
             cfg["compiler_dir"] = compiler
 
+        daily_dirname = Prompt.ask(
+            "  [dim]Daily folder name[/]",
+            default=str(cfg.get("daily_dirname", "daily")),
+            console=console,
+        )
+        cfg["daily_dirname"] = daily_dirname
+
+        resources_dirname = Prompt.ask(
+            "  [dim]Resources folder name[/]",
+            default=str(cfg.get("resources_dirname", "resources")),
+            console=console,
+        )
+        cfg["resources_dirname"] = resources_dirname
+
+        knowledge_dirname = Prompt.ask(
+            "  [dim]Knowledge folder name[/]",
+            default=str(cfg.get("knowledge_dirname", "knowledge")),
+            console=console,
+        )
+        cfg["knowledge_dirname"] = knowledge_dirname
+
         vault = Prompt.ask(
             "  [dim]Vault dir[/]",
             default=cfg.get("vault_dir"),
@@ -514,9 +681,6 @@ def _config_editor() -> None:
         )
         if vault != cfg.get("vault_dir"):
             cfg["vault_dir"] = vault
-            # Propagate to the compiler's config.py so scripts use the new path
-            patch_compiler_config("VAULT_DIR", vault)
-            console.print(f"  [dim]↳ Updated VAULT_DIR in compiler config.py[/]")
 
         # ── Sync folders ───────────────────────────────────────────────
         console.print()
@@ -568,6 +732,24 @@ def _config_editor() -> None:
         console.rule("[dim]  Behaviour  [/]", style="dim")
         console.print()
 
+        provider_name = Prompt.ask(
+            "  [dim]LLM provider[/]",
+            default=str(cfg.get("llm_provider", "claude")),
+            console=console,
+        )
+        cfg["llm_provider"] = provider_name
+
+        fallback_order = Prompt.ask(
+            "  [dim]Fallback order (JSON array)[/]",
+            default=format_config_value(cfg.get("llm_fallback_order", ["claude"])),
+            console=console,
+        )
+        parsed_fallbacks = parse_config_value(fallback_order)
+        if isinstance(parsed_fallbacks, list) and all(isinstance(item, str) for item in parsed_fallbacks):
+            cfg["llm_fallback_order"] = parsed_fallbacks
+        else:
+            console.print("  [yellow]Invalid fallback order, keeping current value.[/]")
+
         hour_str = Prompt.ask(
             "  [dim]Auto-compile after hour (0-23)[/]",
             default=str(cfg.get("compile_after_hour", 18)),
@@ -577,8 +759,6 @@ def _config_editor() -> None:
             hour = int(hour_str)
             if 0 <= hour <= 23:
                 cfg["compile_after_hour"] = hour
-                # Patch the compiler's flush.py constant
-                _patch_flush_hour(hour)
             else:
                 console.print("  [yellow]Out of range, keeping current value.[/]")
         except ValueError:
@@ -622,20 +802,3 @@ def _toggle_prompt(label: str, current: bool) -> bool:
     result = (not current) if flip else current
     console.print()
     return result
-
-
-def _patch_flush_hour(hour: int) -> None:
-    """Update COMPILE_AFTER_HOUR constant in the compiler's flush.py."""
-    flush_path = get_compiler_dir() / "scripts" / "flush.py"
-    if not flush_path.exists():
-        return
-    content = flush_path.read_text(encoding="utf-8")
-    new_content = re.sub(
-        r'^(COMPILE_AFTER_HOUR\s*=\s*)\d+',
-        rf'\g<1>{hour}',
-        content,
-        flags=re.MULTILINE,
-    )
-    if new_content != content:
-        flush_path.write_text(new_content, encoding="utf-8")
-        console.print(f"  [dim]↳ Updated COMPILE_AFTER_HOUR in flush.py → {hour}[/]")

@@ -17,6 +17,11 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULTS: dict[str, Any] = {
     "compiler_dir": str(Path.home() / "projects" / "ai" / "claude-memory-compiler"),
     "vault_dir": str(Path.home() / "My Documents" / "LLM-Brain-General"),
+    "daily_dirname": "daily",
+    "resources_dirname": "resources",
+    "knowledge_dirname": "knowledge",
+    "llm_provider": "claude",
+    "llm_fallback_order": ["claude"],
     "sync": {
         "daily": True,
         "sources": True,        # maps to the vault's resources/ folder
@@ -69,6 +74,11 @@ def set_key(key: str, value: Any) -> None:
     save(cfg)
 
 
+def list_keys() -> list[str]:
+    """List all configurable keys using dot notation."""
+    return _list_keys(DEFAULTS)
+
+
 def _deep_copy(d: dict) -> dict:
     return json.loads(json.dumps(d))
 
@@ -82,3 +92,17 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             result[k] = v
     return result
+
+
+def _list_keys(value: Any, prefix: str = "") -> list[str]:
+    if not isinstance(value, dict):
+        return [prefix] if prefix else []
+
+    keys: list[str] = []
+    for key, nested in value.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        if isinstance(nested, dict):
+            keys.extend(_list_keys(nested, dotted))
+        else:
+            keys.append(dotted)
+    return keys
