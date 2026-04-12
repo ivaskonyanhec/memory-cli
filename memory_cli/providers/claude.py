@@ -1,11 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import click
+
+_CLAUDE_SESSION_VARS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH")
+
+
+def _clean_env() -> dict:
+    """Return a copy of the current environment with Claude Code session markers stripped.
+
+    The bundled `claude` CLI exits with code 1 when it detects a nested session
+    via CLAUDECODE=1. Always pass this env to any subprocess that spawns claude.
+    """
+    env = os.environ.copy()
+    for var in _CLAUDE_SESSION_VARS:
+        env.pop(var, None)
+    return env
 
 
 class ClaudeProvider:
@@ -46,6 +61,7 @@ class ClaudeProvider:
                 text=True,
                 timeout=30,
                 cwd=str(self._get_compiler_dir()),
+                env=_clean_env(),
             )
         except subprocess.TimeoutExpired as exc:
             raise click.ClickException(

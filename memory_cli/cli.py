@@ -149,11 +149,19 @@ def resolve_available_provider():
     return chosen_provider
 
 
+def _clean_env() -> dict:
+    """Return env with Claude Code session markers stripped to prevent nested-session exit."""
+    env = os.environ.copy()
+    for var in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH"):
+        env.pop(var, None)
+    return env
+
+
 def run_script(script: str, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
     ensure_compiler_vault_aliases()
     root = get_compiler_dir()
     cmd = [uv(), "run", "--directory", str(root), "python", str(root / "scripts" / script), *args]
-    return subprocess.run(cmd, text=True, capture_output=capture_output)
+    return subprocess.run(cmd, text=True, capture_output=capture_output, env=_clean_env())
 
 
 def import_markdown_resource(source: Path) -> tuple[Path, str]:
