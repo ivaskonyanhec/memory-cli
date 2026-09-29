@@ -286,7 +286,8 @@ def format_config_value(value) -> str:
 def extract_wikilinks(content: str) -> list[str]:
     import re
 
-    return re.findall(r"\[\[([^\]]+)\]\]", content)
+    prose = re.sub(r"```.*?```|`[^`\n]*`", "", content, flags=re.DOTALL)
+    return re.findall(r"\[\[([^\]]+)\]\]", prose)
 
 
 def list_knowledge_articles() -> list[Path]:
@@ -321,24 +322,33 @@ def compute_missing_backlinks() -> list[tuple[Path, str]]:
     return missing
 
 
+RELATED_HEADINGS = ("## Related Concepts", "## Related")
+
+
 def add_backlink(path: Path, backlink: str, dry_run: bool) -> bool:
     content = path.read_text(encoding="utf-8")
     link_markup = f"[[{backlink}]]"
     if link_markup in content:
         return False
 
-    lines = content.splitlines()
-    related_heading = "## Related Concepts"
-    if related_heading in lines:
-        index = lines.index(related_heading)
-        insert_at = index + 1
-        while insert_at < len(lines) and lines[insert_at].strip():
-            insert_at += 1
-        lines.insert(insert_at, f"- {link_markup}")
-        new_content = "\n".join(lines) + ("\n" if content.endswith("\n") else "")
+    lines = content.rstrip("\n").split("\n")
+    entry = f"- {link_markup}"
+    heading = next((i for i, line in enumerate(lines) if line.strip() in RELATED_HEADINGS), None)
+    if heading is None:
+        sources = next((i for i, line in enumerate(lines) if line.strip() == "## Sources"), None)
+        if sources is None:
+            lines += ["", "## Related Concepts", "", entry]
+        else:
+            lines[sources:sources] = ["## Related Concepts", "", entry, ""]
     else:
-        suffix = "" if content.endswith("\n") else "\n"
-        new_content = f"{content}{suffix}\n## Related Concepts\n- {link_markup}\n"
+        end = next((i for i in range(heading + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+        while end > heading + 1 and not lines[end - 1].strip():
+            end -= 1
+        if end == heading + 1:
+            lines[end:end] = ["", entry]
+        else:
+            lines.insert(end, entry)
+    new_content = "\n".join(lines) + "\n"
 
     if not dry_run:
         path.write_text(new_content, encoding="utf-8")
@@ -478,16 +488,23 @@ def sync(force_all: bool, target_file: str | None, dry_run: bool):
     )
     provider_name = provider.__class__.__name__.removesuffix("Provider").lower()
     console.print(f"  [green]✓[/] Provider ready: [bold]{provider_name}[/]")
-    returncode = 0
+    failed: list[str] = []
     for target in targets:
-        current = run_with_status(f"Compiling {target} with {provider_name}...", provider.compile_one, target)
-        console.print(f"  [green]✓[/] Compiled [bold]{target}[/] with [bold]{provider_name}[/]")
-        if current != 0:
-            returncode = current
-            break
+        try:
+            current = run_with_status(f"Compiling {target} with {provider_name}...", provider.compile_one, target)
+        except click.ClickException as exc:
+            console.print(f"  [yellow]⚠[/] {exc.format_message()}")
+            current = 1
+        if current == 0:
+            console.print(f"  [green]✓[/] Compiled [bold]{target}[/] with [bold]{provider_name}[/]")
+        else:
+            console.print(f"  [red]✗[/] Failed to compile [bold]{target}[/] with [bold]{provider_name}[/]")
+            failed.append(target)
 
+    if failed:
+        console.print(f"\n  [red]{len(failed)} of {len(targets)} target(s) failed.[/] See [bold]memory log[/] for details.")
     console.print()
-    sys.exit(returncode)
+    sys.exit(1 if failed else 0)
 
 
 # ── memory add ────────────────────────────────────────────────────────
