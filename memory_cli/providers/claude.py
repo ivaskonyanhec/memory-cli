@@ -61,7 +61,8 @@ class ClaudeProvider:
                 text=True,
                 timeout=30,
                 cwd=str(self._get_compiler_dir()),
-                env=_clean_env(),
+                # The compiler's session hooks skip marked sessions, so this probe is not flushed into memory.
+                env={**_clean_env(), "CLAUDE_INVOKED_BY": "memory_cli_preflight"},
             )
         except subprocess.TimeoutExpired as exc:
             raise click.ClickException(

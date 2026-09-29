@@ -362,3 +362,20 @@ class CodexQueryPromptTests(unittest.TestCase):
         self.assertIn("INDEX-ROW", prompt)
         self.assertIn(str(knowledge_dir), prompt)
         self.assertNotIn("UNIQUE-ARTICLE-BODY", prompt)
+
+
+class ClaudePreflightEnvTests(unittest.TestCase):
+    def test_preflight_marks_session_so_memory_hooks_skip_it(self) -> None:
+        provider = ClaudeProvider(
+            compiler_dir_getter=lambda: Path("/tmp"),
+            uv_getter=lambda: "uv",
+            run_script=Mock(),
+        )
+
+        with patch("memory_cli.providers.claude.shutil.which", return_value="/usr/local/bin/claude"), patch(
+            "memory_cli.providers.claude.subprocess.run",
+            return_value=Mock(returncode=0, stdout='{"type": "result"}\n', stderr=""),
+        ) as mock_run:
+            provider.check_available()
+
+        self.assertEqual(mock_run.call_args.kwargs["env"].get("CLAUDE_INVOKED_BY"), "memory_cli_preflight")
