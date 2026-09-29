@@ -186,6 +186,41 @@ class MemorySyncCommandTests(unittest.TestCase):
         mock_resolve_provider.return_value.compile_one.assert_called_once_with("resources/article.md")
         self.assertNotIn("session.md", result.output)
 
+    def test_sync_reports_failed_target_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            compiler_dir = root / "compiler"
+            (compiler_dir / "scripts").mkdir(parents=True)
+            vault_dir = root / "vault"
+            resources_dir = vault_dir / "resources"
+            resources_dir.mkdir(parents=True)
+            (resources_dir / "a.md").write_text("# a\n", encoding="utf-8")
+            (resources_dir / "b.md").write_text("# b\n", encoding="utf-8")
+            (compiler_dir / "scripts" / "state.json").write_text(
+                json.dumps({"ingested": {}, "sources": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "memory_cli.cli.config_store.load",
+                return_value={"sync": {"daily": False, "sources": True, "custom_dirs": []}},
+            ), patch(
+                "memory_cli.cli.resolve_available_provider"
+            ) as mock_resolve_provider, patch(
+                "memory_cli.cli.get_compiler_dir", return_value=compiler_dir
+            ), patch(
+                "memory_cli.cli.get_vault_dir", return_value=vault_dir
+            ):
+                mock_resolve_provider.return_value.compile_one.side_effect = [1, 0]
+
+                result = self.runner.invoke(main, ["sync"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(mock_resolve_provider.return_value.compile_one.call_count, 2)
+        self.assertIn("Failed to compile resources/a.md", result.output)
+        self.assertNotIn("Compiled resources/a.md", result.output)
+        self.assertIn("Compiled resources/b.md", result.output)
+
     def test_sync_warns_that_custom_dirs_are_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

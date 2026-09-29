@@ -261,3 +261,69 @@ class ProviderRoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodexPromptTests(unittest.TestCase):
+    def test_compile_prompt_references_articles_instead_of_inlining_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            compiler_dir = root / "compiler"
+            vault_dir = root / "vault"
+            knowledge_dir = vault_dir / "knowledge"
+            (knowledge_dir / "concepts").mkdir(parents=True)
+            compiler_dir.mkdir()
+            (compiler_dir / "AGENTS.md").write_text("# schema\n", encoding="utf-8")
+            (knowledge_dir / "index.md").write_text("# Index\n", encoding="utf-8")
+            (knowledge_dir / "concepts" / "existing.md").write_text("UNIQUE-ARTICLE-BODY\n", encoding="utf-8")
+            source = vault_dir / "resources" / "note.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# Source\n", encoding="utf-8")
+
+            provider = CodexProvider(
+                compiler_dir_getter=lambda: compiler_dir,
+                vault_dir_getter=lambda: vault_dir,
+                daily_dir_getter=lambda: vault_dir / "daily",
+                resources_dir_getter=lambda: source.parent,
+                knowledge_dir_getter=lambda: knowledge_dir,
+            )
+
+            prompt = provider._build_prompt("resources/note.md", source)
+
+        self.assertNotIn("UNIQUE-ARTICLE-BODY", prompt)
+        self.assertIn(str(knowledge_dir), prompt)
+        self.assertIn("resources/note.md", prompt)
+
+    def test_compile_one_sends_prompt_over_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            compiler_dir = root / "compiler"
+            vault_dir = root / "vault"
+            knowledge_dir = vault_dir / "knowledge"
+            resources_dir = vault_dir / "resources"
+            (compiler_dir / "scripts").mkdir(parents=True)
+            (knowledge_dir / "concepts").mkdir(parents=True)
+            resources_dir.mkdir(parents=True)
+            (resources_dir / "note.md").write_text("# Source\n", encoding="utf-8")
+            (compiler_dir / "AGENTS.md").write_text("# schema\n", encoding="utf-8")
+            (compiler_dir / "scripts" / "state.json").write_text('{"ingested": {}, "sources": {}}', encoding="utf-8")
+
+            def fake_run(cmd, **kwargs):
+                (knowledge_dir / "concepts" / "compiled.md").write_text("done\n", encoding="utf-8")
+                return Mock(returncode=0, stdout="OK\n", stderr="")
+
+            provider = CodexProvider(
+                compiler_dir_getter=lambda: compiler_dir,
+                vault_dir_getter=lambda: vault_dir,
+                daily_dir_getter=lambda: vault_dir / "daily",
+                resources_dir_getter=lambda: resources_dir,
+                knowledge_dir_getter=lambda: knowledge_dir,
+            )
+
+            with patch("memory_cli.providers.codex.shutil.which", return_value="/usr/local/bin/codex"), patch(
+                "memory_cli.providers.codex.subprocess.run", side_effect=fake_run
+            ) as mock_run:
+                provider.compile_one("resources/note.md")
+
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[-1], "-")
+        self.assertIn("# schema", mock_run.call_args.kwargs["input"])

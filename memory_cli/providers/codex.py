@@ -96,11 +96,12 @@ class CodexProvider:
             str(compiler_dir),
             "--add-dir",
             str(self._get_vault_dir()),
-            prompt,
+            "-",
         ]
         try:
             result = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=600,
@@ -195,7 +196,6 @@ class CodexProvider:
         compiler_dir = self._get_compiler_dir()
         schema = (compiler_dir / "AGENTS.md").read_text(encoding="utf-8")
         wiki_index = self._read_index()
-        existing_articles = self._existing_articles_context()
         timestamp = self._now_iso()
         content = source_path.read_text(encoding="utf-8")
         knowledge_dir = self._get_knowledge_dir()
@@ -216,7 +216,8 @@ and extract knowledge into structured wiki articles.
 
 ## Existing Wiki Articles
 
-{existing_articles if existing_articles else "(No existing articles yet)"}
+Existing articles are not inlined (the wiki exceeds the context window). Use the index above
+to find related articles, then read them from {knowledge_dir} before updating or linking them.
 
 ## Daily Log to Compile
 
@@ -255,7 +256,8 @@ document and extract knowledge into structured wiki articles.
 
 ## Existing Wiki Articles
 
-{existing_articles if existing_articles else "(No existing articles yet)"}
+Existing articles are not inlined (the wiki exceeds the context window). Use the index above
+to find related articles, then read them from {knowledge_dir} before updating or linking them.
 
 ## Clipped Source to Compile
 
@@ -277,22 +279,9 @@ Read the clipped source above and compile it into wiki articles following the sc
 6. Append a compile entry to `{knowledge_dir / 'log.md'}`
 
 ### Required source references:
-- Use `sources/{source_path.name}` in article/log source references
+- Use `resources/{source_path.name}` in article/log source references
 - Treat this as an external reference, not a conversation log
 """
-
-    def _existing_articles_context(self) -> str:
-        knowledge_dir = self._get_knowledge_dir()
-        parts: list[str] = []
-        for subdir in ["concepts", "connections", "qa"]:
-            directory = knowledge_dir / subdir
-            if not directory.exists():
-                continue
-            for article_path in sorted(directory.glob("*.md")):
-                rel = article_path.relative_to(knowledge_dir)
-                content = article_path.read_text(encoding="utf-8")
-                parts.append(f"### {rel}\n```markdown\n{content}\n```")
-        return "\n\n".join(parts)
 
     def _read_all_wiki_content(self) -> str:
         knowledge_dir = self._get_knowledge_dir()
