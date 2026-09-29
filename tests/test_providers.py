@@ -327,3 +327,38 @@ class CodexPromptTests(unittest.TestCase):
         cmd = mock_run.call_args.args[0]
         self.assertEqual(cmd[-1], "-")
         self.assertIn("# schema", mock_run.call_args.kwargs["input"])
+
+
+class CodexQueryPromptTests(unittest.TestCase):
+    def test_query_sends_index_over_stdin_without_inlining_articles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            compiler_dir = root / "compiler"
+            vault_dir = root / "vault"
+            knowledge_dir = vault_dir / "knowledge"
+            (compiler_dir / "scripts").mkdir(parents=True)
+            (knowledge_dir / "concepts").mkdir(parents=True)
+            (knowledge_dir / "index.md").write_text("# Index\nINDEX-ROW\n", encoding="utf-8")
+            (knowledge_dir / "concepts" / "answer.md").write_text("UNIQUE-ARTICLE-BODY\n", encoding="utf-8")
+            (compiler_dir / "scripts" / "state.json").write_text('{"query_count": 0}', encoding="utf-8")
+
+            provider = CodexProvider(
+                compiler_dir_getter=lambda: compiler_dir,
+                vault_dir_getter=lambda: vault_dir,
+                daily_dir_getter=lambda: vault_dir / "daily",
+                resources_dir_getter=lambda: vault_dir / "resources",
+                knowledge_dir_getter=lambda: knowledge_dir,
+            )
+
+            with patch("memory_cli.providers.codex.shutil.which", return_value="/usr/local/bin/codex"), patch(
+                "memory_cli.providers.codex.subprocess.run",
+                return_value=Mock(returncode=0, stdout="Answer\n", stderr=""),
+            ) as mock_run:
+                provider.query("What is memory?", False)
+
+        cmd = mock_run.call_args.args[0]
+        prompt = mock_run.call_args.kwargs["input"]
+        self.assertEqual(cmd[-1], "-")
+        self.assertIn("INDEX-ROW", prompt)
+        self.assertIn(str(knowledge_dir), prompt)
+        self.assertNotIn("UNIQUE-ARTICLE-BODY", prompt)

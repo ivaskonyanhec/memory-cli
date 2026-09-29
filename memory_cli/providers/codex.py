@@ -145,11 +145,12 @@ class CodexProvider:
             str(compiler_dir),
             "--add-dir",
             str(self._get_vault_dir()),
-            prompt,
+            "-",
         ]
         try:
             result = subprocess.run(
                 cmd,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=600,
@@ -283,23 +284,9 @@ Read the clipped source above and compile it into wiki articles following the sc
 - Treat this as an external reference, not a conversation log
 """
 
-    def _read_all_wiki_content(self) -> str:
-        knowledge_dir = self._get_knowledge_dir()
-        parts = [f"## INDEX\n\n{self._read_index()}"]
-        for subdir in ["concepts", "connections", "qa"]:
-            directory = knowledge_dir / subdir
-            if not directory.exists():
-                continue
-            for md_file in sorted(directory.glob("*.md")):
-                rel = md_file.relative_to(knowledge_dir)
-                content = md_file.read_text(encoding="utf-8")
-                parts.append(f"## {rel}\n\n{content}")
-        return "\n\n---\n\n".join(parts)
-
     def _build_query_prompt(self, question: str, file_back: bool) -> str:
         knowledge_dir = self._get_knowledge_dir()
         qa_dir = knowledge_dir / "qa"
-        wiki_content = self._read_all_wiki_content()
         file_back_instructions = ""
         if file_back:
             timestamp = self._now_iso()
@@ -318,20 +305,20 @@ After answering, do the following:
 """
 
         return f"""You are a knowledge base query engine. Answer the user's question by
-consulting the knowledge base below.
+consulting the knowledge base in {knowledge_dir}.
 
 ## How to Answer
 
-1. Read the INDEX section first
+1. Read the INDEX below first
 2. Identify 3-10 articles that are relevant to the question
-3. Read those articles carefully
+3. Read those articles from {knowledge_dir} (paths are relative to it, e.g. concepts/slug.md)
 4. Synthesize a clear, thorough answer
 5. Cite your sources using [[wikilinks]]
 6. If the knowledge base does not contain relevant information, say so honestly
 
-## Knowledge Base
+## INDEX
 
-{wiki_content}
+{self._read_index()}
 
 ## Question
 
